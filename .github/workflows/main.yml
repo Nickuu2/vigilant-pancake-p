@@ -1,1 +1,128 @@
 
+
+
+YML icon
+telemetry_sync
+name: Telemetry Sync Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: telemetry-sync-pipeline
+  cancel-in-progress: false
+
+jobs:
+  sync-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+
+    steps:
+      - name: Pre-Flight Configuration Check
+        shell: bash
+        env:
+          CORE_REPO: ${{ secrets.CORE_REPO }}
+          CORE_REPO_TOKEN: ${{ secrets.CORE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CORE_REPO" ] || [ -z "$CORE_REPO_TOKEN" ]; then
+            echo "::error::Missing required repository secrets."
+            exit 1
+          fi
+
+      - name: Checkout Core Package
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.CORE_REPO }}
+          token: ${{ secrets.CORE_REPO_TOKEN }}
+          path: _pkg
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Runtime Packages
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests curl_cffi websockets redis pynacl
+
+      - name: Restore Persistent Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            _pkg/sync_state.bin.gz
+            _pkg/worker_logs
+          key: sync-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sync-state-v1-
+
+      - name: Run Sync Worker
+        working-directory: _pkg
+        shell: bash
+        env:
+          ENTRY_SCRIPT: ${{ secrets.ENTRY_SCRIPT || 'sync_engine.py' }}
+          MAX_RUNTIME_SECONDS: "19800"
+          ENABLE_STATE_PERSISTENCE: "true"
+          PERSIST_STATE_FILE: "sync_state.bin.gz"
+          LOG_DIR: "worker_logs"
+          USE_PROXY: "true"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          if [ ! -f ".env" ]; then
+            echo "::error::Missing .env file in private repository."
+            exit 1
+          fi
+          chmod 600 .env
+          # Strict network-route guardrail (verifies proxy config is present before launching)
+          python -c "
+          vals = {}
+          for line in open('.env', encoding='utf-8'):
+              s = line.strip()
+              if not s or s.startswith('#') or '=' not in s: continue
+              k, v = s.split('=', 1)
+              vals[k.strip()] = v.strip().strip('"').strip("'")
+          if vals.get('USE_PROXY', '').lower() not in ('true', '1', 'yes') or not vals.get('PROXY_IPS'):
+              raise SystemExit('Network route guard failed: proxy pool missing.')
+          "
+          python -u "$ENTRY_SCRIPT"
+
+      - name: Save Persistent Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            _pkg/sync_state.bin.gz
+            _pkg/worker_logs
+          key: sync-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Cleanup Workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf _pkg
+
+      - name: Schedule Next Run
+        if: always() && !cancelled()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/telemetry_sync.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'
