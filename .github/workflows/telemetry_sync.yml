@@ -108,8 +108,9 @@ jobs:
         if: always()
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN || github.token }}
         run: |
+          sleep 3
           python - <<'PY'
           import json, os, urllib.request
           repo = "${{ github.repository }}"
@@ -122,13 +123,17 @@ jobs:
           }
           try:
               req = urllib.request.Request(
-                  f"https://api.github.com/repos/{repo}/actions/caches?key={prefix}&sort=created_at&direction=desc&per_page=100",
+                  f"https://api.github.com/repos/{repo}/actions/caches?per_page=100",
                   headers=headers,
               )
               with urllib.request.urlopen(req, timeout=15) as r:
-                  caches = json.loads(r.read().decode("utf-8")).get("actions_caches", [])
-              # Keep the 2 newest caches (current + 1 backup); delete all older ones
-              for c in caches[2:]:
+                  all_caches = json.loads(r.read().decode("utf-8")).get("actions_caches", [])
+              matched = [c for c in all_caches if str(c.get("key", "")).startswith(prefix)]
+              matched.sort(key=lambda c: str(c.get("created_at", "")), reverse=True)
+              print(f"Found {len(matched)} cache(s) for prefix {prefix}")
+              # Keep only the 1 newest cache; delete all older ones
+              deleted = 0
+              for c in matched[1:]:
                   cid = c.get("id")
                   if not cid:
                       continue
@@ -139,10 +144,12 @@ jobs:
                   )
                   try:
                       urllib.request.urlopen(dreq, timeout=15).read()
-                  except Exception:
-                      pass
-          except Exception:
-              pass
+                      deleted += 1
+                  except Exception as exc:
+                      print(f"Could not delete cache {cid}: {exc}")
+              print(f"Pruned {deleted} older cache(s); kept {min(1, len(matched))} latest.")
+          except Exception as exc:
+              print(f"Cache prune skipped: {exc}")
           PY
 
       - name: Cleanup Workspace
