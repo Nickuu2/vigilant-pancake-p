@@ -65,6 +65,8 @@ jobs:
         working-directory: _pkg
         shell: bash
         env:
+          CORE_REPO: ${{ secrets.CORE_REPO }}
+          CORE_REPO_TOKEN: ${{ secrets.CORE_REPO_TOKEN }}
           ENTRY_SCRIPT: ${{ secrets.ENTRY_SCRIPT || 'sync_engine.py' }}
           MAX_RUNTIME_SECONDS: "19800"
           ENABLE_STATE_PERSISTENCE: "true"
