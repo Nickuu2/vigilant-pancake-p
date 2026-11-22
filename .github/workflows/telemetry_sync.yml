@@ -104,6 +104,47 @@ jobs:
             _pkg/worker_logs
           key: sync-state-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
+      - name: Prune Older Caches
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          repo = "${{ github.repository }}"
+          token = os.environ.get("GH_TOKEN", "")
+          prefix = "sync-state-v1-"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          try:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/actions/caches?key={prefix}&sort=created_at&direction=desc&per_page=100",
+                  headers=headers,
+              )
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  caches = json.loads(r.read().decode("utf-8")).get("actions_caches", [])
+              # Keep the 2 newest caches (current + 1 backup); delete all older ones
+              for c in caches[2:]:
+                  cid = c.get("id")
+                  if not cid:
+                      continue
+                  dreq = urllib.request.Request(
+                      f"https://api.github.com/repos/{repo}/actions/caches/{cid}",
+                      headers=headers,
+                      method="DELETE",
+                  )
+                  try:
+                      urllib.request.urlopen(dreq, timeout=15).read()
+                  except Exception:
+                      pass
+          except Exception:
+              pass
+          PY
+
       - name: Cleanup Workspace
         if: always()
         shell: bash
